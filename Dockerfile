@@ -21,6 +21,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=builder /app/dist-server ./dist-server
 COPY --from=builder /app/public ./public
+RUN mkdir -p /app/logs && chown node:node /app/logs
 
 # Run as non-root user
 USER node
