@@ -1,0 +1,22 @@
+# Secrets & Credentials
+.env
+.env.*
+!.env.example
+keys/
+*.key
+*.pem
+
+# Server & Connection Metadata
+servers.csv
+!servers.example.csv
+
+# Logs & Audit Dumps
+logs/
+*.log
+audit_log.json
+
+# Dependencies & Build Artifacts
+node_modules/
+dist-release/
+.DS_Store
+Thumbs.db

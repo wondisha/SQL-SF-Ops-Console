@@ -1,0 +1,31 @@
+name: Enterprise CI Pipeline
+
+on:
+  push:
+    branches: [ main, master, feature/** ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  validate-and-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Verify Backend TypeScript Compilation
+        run: npm run build:server
+
+      - name: Docker Build Check
+        run: |
+          docker build -t sqldb-ops-console:ci-test .

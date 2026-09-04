@@ -1,0 +1,3 @@
+id,name,server,database,engine,warehouse,role,user,password,encrypt
+snowflake-prod,Snowflake Analytics,FUYJNCR-VC67103,SNOWFLAKE,snowflake,COMPUTE_WH,ACCOUNTADMIN,SFSESSIONUSER,YourPasswordHere,true
+sql-prod,Production SQL Server,localhost,master,sqlserver,,,sa,YourPasswordHere,false

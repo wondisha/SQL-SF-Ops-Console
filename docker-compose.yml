@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  omnidb-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: omnidb-console-app
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+      - NODE_ENV=production
+      - REDIS_HOST=omnidb-redis
+      - REDIS_PORT=6379
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      - omnidb-redis
+
+  omnidb-redis:
+    image: redis:7-alpine
+    container_name: omnidb-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
