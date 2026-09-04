@@ -1,0 +1,13 @@
+{
+  "name": "OmniDB Console Demo",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:20",
+  "forwardPorts": [4000],
+  "portsAttributes": {
+    "4000": {
+      "label": "OmniDB Web Console",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "postCreateCommand": "npm ci && npm run build:server",
+  "postStartCommand": "npm run demo"
+}

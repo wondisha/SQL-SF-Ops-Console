@@ -1,3 +1,4 @@
+const IS_DEMO_MODE = process.env.DEMO_MODE === 'true';
 import { Request, Response, NextFunction } from 'express';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { writeAuditLog } from '../services/audit.service';
@@ -30,6 +31,23 @@ if (!ISSUER_URL || !AUDIENCE) {
 const JWKS = ISSUER_URL ? createRemoteJWKSet(new URL(`${ISSUER_URL}/discovery/v2.0/keys`)) : null;
 
 export async function authenticateToken(req: Request, res: Response, next: NextFunction): Promise<void> {
+  // 1. Whitelist public health endpoints
+  if (req.path === '/health' || req.path === '/api/health') {
+    return next();
+  }
+
+  // 2. Mock authentication when running in simulation/demo mode
+  if (IS_DEMO_MODE) {
+    req.user = {
+      id: 'demo-user-id',
+      email: 'demo-evaluator@omnidb.local',
+      name: 'OmniDB Demo Evaluator',
+      roles: ['Admin', 'diagnostics:read'],
+      groups: ['DemoUsers'],
+      tenantId: 'demo-sandbox'
+    };
+    return next();
+  }
   const token = req.cookies?.session_token || req.headers.authorization?.replace(/^Bearer\s+/, '');
 
   if (!token) {
@@ -128,3 +146,4 @@ export function requireRole(role: string) {
     next();
   };
 }
+

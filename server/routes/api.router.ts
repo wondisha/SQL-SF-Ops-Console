@@ -3,8 +3,6 @@ import { sanitizeRowData } from '../services/query-sanitizer.service';
 import { Router, Request, Response } from 'express';
 import { requirePermission } from '../middleware/rbac.middleware';
 import { slidingWindowRateLimit } from '../middleware/rate-limiter.middleware';
-import { poolManager } from '../services/connection-pool';
-import { vaultService } from '../services/vault.service';
 import fs from 'fs';
 import path from 'path';
 
@@ -15,6 +13,8 @@ const limiter = slidingWindowRateLimit({
   maxRequests: 180,
   keyPrefix: 'api-ops'
 });
+
+const IS_DEMO_MODE = process.env.DEMO_MODE === 'true';
 
 function getInventory() {
   const csvPath = path.join(process.cwd(), 'servers.csv');
@@ -38,7 +38,11 @@ function getInventory() {
 
 // 1. Health Probe
 apiRouter.get('/health', (_req: Request, res: Response) => {
-  res.json({ status: 'HEALTHY', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'HEALTHY', 
+    timestamp: new Date().toISOString(),
+    mode: IS_DEMO_MODE ? 'SIMULATION' : 'PRODUCTION'
+  });
 });
 
 // 2. Server Test Check
@@ -68,22 +72,18 @@ apiRouter.get('/servers/:instanceId/databases', limiter, requirePermission('diag
       case 'snowflake':
         res.json([{ name: 'FINANCIAL_SERVICES_DB' }, { name: 'SNOWFLAKE' }, { name: 'TASTY_BYTES_DBT_DB' }]);
         break;
-
       case 'postgres':
         res.json([{ name: 'postgres' }, { name: 'analytics' }, { name: 'app_production' }]);
         break;
-
       case 'mysql':
         res.json([{ name: 'mysql' }, { name: 'sys' }, { name: 'appdb' }]);
         break;
-
       case 'db2':
         res.json([{ name: 'SAMPLE' }, { name: 'SYSCAT' }, { name: 'FINCORE' }]);
         break;
-
       case 'sqlserver':
       default:
-        res.json([{ name: 'master' }, { name: 'tempdb' }, { name: 'model' }, { name: 'msdb' }]);
+        res.json([{ name: 'master' }, { name: 'tempdb' }, { name: 'model' }, { name: 'msdb' }, { name: 'AdventureWorks2025' }]);
         break;
     }
   } catch (err: any) {
@@ -116,35 +116,6 @@ apiRouter.get('/catalog', limiter, requirePermission('diagnostics:read'), (_req:
       ]
     },
     {
-      id: 'index-maint',
-      label: 'Index Maintenance',
-      description: 'Index health, missing index suggestions, and physical fragmentation remediation.',
-      engines: ['sqlserver', 'postgres', 'mysql', 'db2'],
-      queries: [
-        { id: 'missing-indexes', title: 'High Impact Missing Indexes', scope: 'Database' },
-        { id: 'fragmented-indexes', title: 'Index Fragmentation > 30%', scope: 'Database' }
-      ]
-    },
-    {
-      id: 'blocking',
-      label: 'Blocking & Deadlocks',
-      description: 'Real-time active workload, blocking chains, and session termination controls.',
-      engines: ['sqlserver', 'postgres', 'mysql', 'db2'],
-      queries: [
-        { id: 'blocking-tree', title: 'Live Blocking Hierarchy & Lock Waits', scope: 'Instance' },
-        { id: 'active-sessions', title: 'Active User Requests & Execution State', scope: 'Instance' }
-      ]
-    },
-    {
-      id: 'storage-vlf',
-      label: 'Storage & Transaction Logs',
-      description: 'Transaction log fragmentation, file sizing, and storage contention.',
-      engines: ['sqlserver', 'postgres', 'mysql', 'db2'],
-      queries: [
-        { id: 'log-vlf-audit', title: 'Log Growth & Transaction Contention', scope: 'Instance' }
-      ]
-    },
-    {
       id: 'snowflake-finops',
       label: 'Snowflake FinOps & AI',
       description: 'Warehouse credit metering, query spillage, cache efficiency, and idle compute audits.',
@@ -153,16 +124,6 @@ apiRouter.get('/catalog', limiter, requirePermission('diagnostics:read'), (_req:
         { id: 'warehouse-metering', title: 'Warehouse Credit Consumption (Last 7 Days)', scope: 'SNOWFLAKE' },
         { id: 'idle-suspend-audit', title: 'Warehouse Inefficiency & Idle Suspend Audit', scope: 'SNOWFLAKE' },
         { id: 'resource-monitors', title: 'Resource Monitor Budget & Quota Compliance', scope: 'SNOWFLAKE' }
-      ]
-    },
-    {
-      id: 'snowflake-governance',
-      label: 'Snowflake Governance & Security',
-      description: 'Data classification, masking policies, row-access enforcement, RBAC audit, and MFA compliance.',
-      engines: ['snowflake'],
-      queries: [
-        { id: 'rbac-audit', title: 'Privilege Inheritance & Role Grantees', scope: 'SNOWFLAKE' },
-        { id: 'masking-policies', title: 'Dynamic Data Masking Policy Coverage', scope: 'SNOWFLAKE' }
       ]
     }
   ];
@@ -177,13 +138,51 @@ apiRouter.get('/query/:categoryId/:queryId', limiter, requirePermission('diagnos
   const database = (req.query.database as string) || 'master';
 
   const servers = getInventory();
-  const srv = servers.find(s => s.id === serverId) || servers[0];
+  const srv = servers.find(s => s.id === serverId) || servers[0] || { id: 'sql-primary', engine: 'sqlserver' };
   const start = Date.now();
 
   try {
     let columns: string[] = [];
     let rows: Record<string, any>[] = [];
 
+    // --- Simulation / Demo Execution Mode ---
+    if (IS_DEMO_MODE) {
+      const simulatedDelay = Math.floor(Math.random() * 120) + 30;
+      await new Promise(r => setTimeout(r, simulatedDelay));
+
+      if (srv.engine === 'snowflake') {
+        columns = ['WAREHOUSE_NAME', 'TOTAL_CREDITS', 'COMPUTE_CREDITS', 'CLOUD_SERVICES_CREDITS', 'ESTIMATED_COST_USD'];
+        rows = [
+          { WAREHOUSE_NAME: 'ANALYTICS_WH', TOTAL_CREDITS: '14.28', COMPUTE_CREDITS: '13.80', CLOUD_SERVICES_CREDITS: '0.48', ESTIMATED_COST_USD: '42.84' },
+          { WAREHOUSE_NAME: 'CORTEX_SEARCH_WH', TOTAL_CREDITS: '3.12', COMPUTE_CREDITS: '3.10', CLOUD_SERVICES_CREDITS: '0.02', ESTIMATED_COST_USD: '9.36' }
+        ];
+      } else if (srv.engine === 'postgres') {
+        columns = ['pid', 'usename', 'datname', 'state', 'wait_event', 'duration_sec'];
+        rows = [
+          { pid: 4812, usename: 'pg_admin', datname: database, state: 'active', wait_event: 'DataFileRead', duration_sec: 1.4 },
+          { pid: 4890, usename: 'app_user', datname: database, state: 'idle in transaction', wait_event: 'ClientRead', duration_sec: 12.8 }
+        ];
+      } else {
+        columns = ['session_id', 'status', 'command', 'cpu_time', 'total_elapsed_time', 'wait_type', 'database_name'];
+        rows = [
+          { session_id: 56, status: 'runnable', command: 'SELECT', cpu_time: 14, total_elapsed_time: 21, wait_type: 'SOS_SCHEDULER_YIELD', database_name: database },
+          { session_id: 62, status: 'suspended', command: 'INSERT', cpu_time: 120, total_elapsed_time: 480, wait_type: 'PAGEIOLATCH_SH', database_name: database }
+        ];
+      }
+
+      const sanitizedRows = sanitizeRowData(rows);
+      res.json({
+        categoryId,
+        queryId,
+        elapsedMs: simulatedDelay,
+        columns,
+        rows: sanitizedRows,
+        simulated: true
+      });
+      return;
+    }
+
+    // --- Standard Live Execution Mode ---
     switch (srv.engine) {
       case 'postgres':
         if (queryId === 'instance-vitals' || queryId === 'top-waits') {

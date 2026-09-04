@@ -20,3 +20,7 @@ node_modules/
 dist-release/
 .DS_Store
 Thumbs.db
+
+dist-server/
+
+dist/
