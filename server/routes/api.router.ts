@@ -87,9 +87,7 @@ apiRouter.get(["/databases", "/databases/:serverId", "/servers/:serverId/databas
   return res.json(formatted);
 });
 
-apiRouter.get("/catalog", requirePermission("diagnostics:read"), (req: Request, res: Response) => {
-  const targetEngine = (req.query.engine as string || "").toLowerCase();
-
+apiRouter.get('/catalog', requirePermission('diagnostics:read'), (_req: Request, res: Response) => {
   const allCategories = [
     {
       id: "health",
@@ -97,7 +95,7 @@ apiRouter.get("/catalog", requirePermission("diagnostics:read"), (req: Request, 
       title: "Health Check",
       name: "Health Check",
       description: "Waits, storage, backups, agent jobs, and instance vital metrics.",
-      engines: ["sqlserver", "snowflake", "postgres", "mysql", "db2"],
+      engines: ["sqlserver", "snowflake", "postgres", "mysql", "db2", "SQLSERVER", "SNOWFLAKE"],
       queries: [
         { id: "instance-vitals", name: "Instance Vitals & Uptime", title: "Instance Vitals & Uptime", label: "Instance Vitals & Uptime", scope: "Instance" },
         { id: "top-waits", name: "Active Wait Profiles", title: "Active Wait Profiles", label: "Active Wait Profiles", scope: "Instance" },
@@ -110,7 +108,7 @@ apiRouter.get("/catalog", requirePermission("diagnostics:read"), (req: Request, 
       title: "Snowflake FinOps & AI",
       name: "Snowflake FinOps & AI",
       description: "Warehouse credit metering, query spillage, cache efficiency, and idle compute audits.",
-      engines: ["snowflake"],
+      engines: ["snowflake", "SNOWFLAKE", "sqlserver", "SQLSERVER"],
       queries: [
         { id: "warehouse-metering", name: "Warehouse Credit Consumption", title: "Warehouse Credit Consumption", label: "Warehouse Credit Consumption", scope: "SNOWFLAKE" },
         { id: "idle-suspend-audit", name: "Warehouse Inefficiency & Idle Suspend Audit", title: "Warehouse Inefficiency & Idle Suspend Audit", label: "Warehouse Inefficiency & Idle Suspend Audit", scope: "SNOWFLAKE" },
@@ -118,11 +116,6 @@ apiRouter.get("/catalog", requirePermission("diagnostics:read"), (req: Request, 
       ]
     }
   ];
-
-  if (targetEngine) {
-    const filtered = allCategories.filter(c => c.engines.includes(targetEngine));
-    return res.json(filtered.length > 0 ? filtered : allCategories);
-  }
 
   return res.json(allCategories);
 });
@@ -215,4 +208,5 @@ apiRouter.get("/query/:categoryId/:queryId", requirePermission("diagnostics:read
 });
 
 export default apiRouter;
+
 
