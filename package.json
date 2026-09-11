@@ -33,13 +33,13 @@
     "@types/cookie-parser": "^1.4.7",
     "@types/express": "^4.17.21",
     "@types/mssql": "^9.1.5",
-    "@types/node": "^22.20.2",
+    "@types/node": "^20.14.9",
     "@types/uuid": "^10.0.0",
     "cross-env": "^10.1.0",
     "esbuild": "^0.28.2",
     "nodemon": "^3.1.4",
     "postject": "^1.0.0-alpha.6",
     "ts-node": "^10.9.2",
-    "typescript": "^7.0.2"
+    "typescript": "^5.5.3"
   }
 }

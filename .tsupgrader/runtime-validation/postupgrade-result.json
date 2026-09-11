@@ -1,12 +1,12 @@
 {
   "planHash": "652481510ec42c60a6b370e9fa8e7cce42de727fba87c919a1e893e4b671fcd2",
   "phase": "postupgrade",
-  "recordedAtUtc": "2026-09-11T13:53:51.8285210Z",
+  "recordedAtUtc": "2026-09-11T13:54:54.1998347Z",
   "retryCount": 0,
   "resetBaseline": false,
   "result": {
     "setupSucceeded": true,
-    "setupDurationMs": 1169,
+    "setupDurationMs": 1168,
     "setupFailureOutput": null,
     "assertions": [
       {
