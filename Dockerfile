@@ -1,17 +1,4 @@
-# --- Stage 1: Build ---
-FROM node:20-alpine AS builder
-WORKDIR /app
-
-COPY package*.json ./
-RUN npm ci
-
-COPY tsconfig*.json ./
-COPY server/ ./server/
-COPY public/ ./public/
-
-RUN npm run build:server
-
-# --- Stage 2: Runtime ---
+# Production runtime for the canonical JavaScript server.
 FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
@@ -19,12 +6,13 @@ ENV NODE_ENV=production
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-COPY --from=builder /app/dist-server ./dist-server
-COPY --from=builder /app/public ./public
+COPY src/ ./src/
+COPY public/ ./public/
 RUN mkdir -p /app/logs && chown node:node /app/logs
 
 # Run as non-root user
 USER node
 
 EXPOSE 4000
-CMD ["node", "dist-server/index.js"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD node -e "require('http').get('http://127.0.0.1:4000/healthz/live', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+CMD ["node", "src/server.js"]

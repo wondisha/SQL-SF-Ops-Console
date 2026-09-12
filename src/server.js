@@ -5,6 +5,15 @@ const fs = require('fs');
 const fsPromises = require('fs').promises;
 const path = require('path');
 const { exec } = require('child_process');
+const { Pool: PgPool } = require('pg');
+const mysql = require('mysql2/promise');
+const { createRemoteJWKSet, jwtVerify } = require('jose');
+let ibmdb = null;
+try {
+    ibmdb = require('ibm_db');
+} catch (err) {
+    console.warn('ibm_db is not available. DB2 connections will remain unavailable.');
+}
 require('dotenv').config();
 
 let snowflake = null;
@@ -15,8 +24,83 @@ try {
 }
 
 const app = express();
+const IS_DEMO_MODE = process.env.DEMO_MODE === 'true';
+const AUTH_JWKS_URL = process.env.AUTH_JWKS_URL;
+const AUTH_ISSUER = process.env.AUTH_ISSUER;
+const AUTH_AUDIENCE = process.env.AUTH_AUDIENCE;
+const remoteJwks = AUTH_JWKS_URL ? createRemoteJWKSet(new URL(AUTH_JWKS_URL)) : null;
 app.use(cors());
 app.use(express.json());
+
+async function authenticateRequest(req, res, next) {
+    if (IS_DEMO_MODE) {
+        req.user = {
+            id: 'demo-analyst',
+            sub: 'demo-analyst',
+            name: 'Demo DBRE Analyst',
+            roles: ['Viewer', 'Operator'],
+            permissions: ['diagnostics:read', 'diagnostics:execute']
+        };
+        return next();
+    }
+
+    if (!remoteJwks) {
+        return res.status(503).json({
+            error: 'AUTHENTICATION_NOT_CONFIGURED',
+            message: 'Configure AUTH_JWKS_URL before enabling live API access.'
+        });
+    }
+
+    const authorization = req.headers.authorization || '';
+    const [scheme, token] = authorization.split(' ');
+    if (scheme !== 'Bearer' || !token) {
+        return res.status(401).json({ error: 'UNAUTHORIZED', message: 'A Bearer token is required.' });
+    }
+
+    try {
+        const verifyOptions = {};
+        if (AUTH_ISSUER) verifyOptions.issuer = AUTH_ISSUER;
+        if (AUTH_AUDIENCE) verifyOptions.audience = AUTH_AUDIENCE;
+
+        const { payload } = await jwtVerify(token, remoteJwks, verifyOptions);
+        req.user = {
+            ...payload,
+            id: payload.oid || payload.sub,
+            roles: Array.isArray(payload.roles) ? payload.roles : [],
+            permissions: Array.isArray(payload.permissions) ? payload.permissions : []
+        };
+        return next();
+    } catch (err) {
+        return res.status(401).json({ error: 'UNAUTHORIZED', message: 'The Bearer token is invalid or expired.' });
+    }
+}
+
+const ROLE_PERMISSIONS = {
+    Viewer: ['diagnostics:read'],
+    Operator: ['diagnostics:read', 'diagnostics:execute', 'sessions:terminate'],
+    Admin: ['diagnostics:read', 'diagnostics:execute', 'sessions:terminate', 'connections:manage', 'audit:export']
+};
+
+function requirePermission(permission) {
+    return (req, res, next) => {
+        if (IS_DEMO_MODE) return next();
+
+        const user = req.user || {};
+        const granted = new Set([
+            ...(Array.isArray(user.permissions) ? user.permissions : []),
+            ...(Array.isArray(user.roles) ? user.roles.flatMap(role => ROLE_PERMISSIONS[role] || []) : [])
+        ]);
+
+        if (!granted.has(permission)) {
+            return res.status(403).json({
+                error: 'FORBIDDEN',
+                message: `Missing required permission: ${permission}`
+            });
+        }
+
+        return next();
+    };
+}
 
 // ---------------------------------------------------------------- static folder auto-resolution
 const frontendPath = [
@@ -29,6 +113,11 @@ const frontendPath = [
 
 console.log(`Serving static UI from: ${frontendPath}`);
 app.use(express.static(frontendPath));
+app.use('/api', authenticateRequest);
+app.use('/api', (req, res, next) => {
+    if (req.method === 'GET') return requirePermission('diagnostics:read')(req, res, next);
+    return next();
+});
 
 const auditLogPath = path.join(process.cwd(), 'audit_log.json');
 const csvConfigPath = path.join(process.cwd(), 'servers.csv');
@@ -79,17 +168,22 @@ function parseCsvServers(content) {
         headers.forEach((h, idx) => {
             entry[h] = values[idx] || '';
         });
+        const id = entry.id || entry.server || 'unnamed';
+        const secretPrefix = `OMNIDB_${id.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase()}`;
+
         return {
-            id: entry.id || entry.server || 'unnamed',
+            id,
             name: entry.name || entry.id || entry.server,
-            server: entry.server || 'localhost',
+            server: (entry.engine || '').toLowerCase() === 'mysql'
+                ? (process.env.MYSQL_HOST || entry.server || 'localhost')
+                : (entry.server || 'localhost'),
             database: entry.database || 'master',
             engine: (entry.engine || entry.auth || 'sqlserver').toLowerCase(),
             warehouse: entry.warehouse || process.env.SNOWFLAKE_WAREHOUSE || 'COMPUTE_WH',
             schema: entry.schema || 'PUBLIC',
             role: entry.role || process.env.SNOWFLAKE_ROLE || 'ACCOUNTADMIN',
-            user: entry.user || process.env.DB_USER || process.env.SNOWFLAKE_USER,
-            password: entry.password || process.env.DB_PASSWORD || process.env.SNOWFLAKE_PASSWORD,
+            user: process.env[`${secretPrefix}_USER`] || process.env.DB_USER || process.env.SNOWFLAKE_USER,
+            password: process.env[`${secretPrefix}_PASSWORD`] || process.env.DB_PASSWORD || process.env.SNOWFLAKE_PASSWORD,
             encrypt: String(entry.encrypt).toLowerCase() === 'true'
         };
     });
@@ -131,6 +225,28 @@ function getServersList() {
 // ---------------------------------------------------------------- connection pool registry (MSSQL & Snowflake)
 const connectionPools = new Map();
 const snowflakePools = new Map();
+const postgresPools = new Map();
+const mysqlPools = new Map();
+const db2Connections = new Map();
+let shuttingDown = false;
+
+app.get('/healthz/live', (_req, res) => {
+    res.status(shuttingDown ? 503 : 200).json({
+        status: shuttingDown ? 'SHUTTING_DOWN' : 'UP'
+    });
+});
+
+app.get('/healthz/ready', (_req, res) => {
+    const authReady = IS_DEMO_MODE || Boolean(remoteJwks);
+    const ready = !shuttingDown && authReady;
+    res.status(ready ? 200 : 503).json({
+        status: ready ? 'READY' : 'NOT_READY',
+        checks: {
+            authentication: authReady ? 'configured' : 'not_configured',
+            shutdown: shuttingDown ? 'in_progress' : 'stable'
+        }
+    });
+});
 
 async function getPool(serverId) {
     const servers = getServersList();
@@ -178,6 +294,85 @@ async function getPool(serverId) {
     await pool.connect();
     connectionPools.set(key, pool);
     return pool;
+}
+
+function getPostgresPool(serverId) {
+    const servers = getServersList();
+    const srv = servers.find(s => s.id === serverId || s.name === serverId) || servers[0];
+    const key = `pg_${srv.id}`;
+
+    if (!postgresPools.has(key)) {
+        postgresPools.set(key, new PgPool({
+            host: srv.server || 'localhost',
+            port: Number(srv.port || process.env.PGPORT || 5432),
+            database: srv.database || process.env.PGDATABASE || 'postgres',
+            user: srv.user || process.env.PGUSER || 'postgres',
+            password: srv.password || process.env.PGPASSWORD,
+            max: 10,
+            idleTimeoutMillis: 30000,
+            connectionTimeoutMillis: 10000,
+            ssl: srv.encrypt ? { rejectUnauthorized: false } : false
+        }));
+    }
+
+    return postgresPools.get(key);
+}
+
+function getMysqlPool(serverId) {
+    const servers = getServersList();
+    const srv = servers.find(s => s.id === serverId || s.name === serverId) || servers[0];
+    const key = `mysql_${srv.id}`;
+
+    if (!mysqlPools.has(key)) {
+        mysqlPools.set(key, mysql.createPool({
+            host: srv.server || 'localhost',
+            port: Number(srv.port || process.env.MYSQL_PORT || 3306),
+            database: srv.database || process.env.MYSQL_DATABASE || 'mysql',
+            user: srv.user || process.env.MYSQL_USER || 'root',
+            password: srv.password || process.env.MYSQL_PASSWORD,
+            waitForConnections: true,
+            connectionLimit: 10,
+            queueLimit: 0,
+            connectTimeout: 10000,
+            ssl: srv.encrypt ? { rejectUnauthorized: false } : undefined
+        }));
+    }
+
+    return mysqlPools.get(key);
+}
+
+function getDb2Connection(serverId) {
+    if (!ibmdb) {
+        return Promise.reject(new Error('ibm_db is not installed or could not load its native driver.'));
+    }
+
+    const servers = getServersList();
+    const srv = servers.find(s => s.id === serverId || s.name === serverId) || servers[0];
+    const key = `db2_${srv.id}`;
+    if (db2Connections.has(key)) return db2Connections.get(key);
+
+    const connectionString = [
+        `DATABASE=${srv.database || 'SAMPLE'}`,
+        `HOSTNAME=${process.env.DB2_HOST || srv.server || 'localhost'}`,
+        `PORT=${srv.port || process.env.DB2_PORT || 50000}`,
+        'PROTOCOL=TCPIP',
+        'CONNECTTIMEOUT=10',
+        `UID=${srv.user || process.env.DB2_USER || ''}`,
+        `PWD=${srv.password || process.env.DB2_PASSWORD || ''}`
+    ].join(';') + ';';
+
+    const connection = new Promise((resolve, reject) => {
+        ibmdb.open(connectionString, (err, conn) => err ? reject(err) : resolve(conn));
+    });
+    db2Connections.set(key, connection);
+    connection.catch(() => db2Connections.delete(key));
+    return connection;
+}
+
+function queryDb2(serverId, query) {
+    return getDb2Connection(serverId).then(conn => new Promise((resolve, reject) => {
+        ibmdb.query(conn, query, (err, rows) => err ? reject(err) : resolve(rows));
+    }));
 }
 
 function getSnowflakePool(serverId) {
@@ -267,6 +462,10 @@ app.get('/api/servers/:serverId/databases', async (req, res) => {
     const serverId = req.params.serverId;
     const srv = servers.find(s => s.id === serverId || s.name === serverId) || servers[0];
 
+    if (IS_DEMO_MODE) {
+        return res.json([{ name: srv.database || (srv.engine === 'snowflake' ? 'SNOWFLAKE' : 'master') }]);
+    }
+
     try {
         if (srv.engine === 'snowflake') {
             try {
@@ -283,6 +482,25 @@ app.get('/api/servers/:serverId/databases', async (req, res) => {
             ]);
         }
 
+        if (srv.engine === 'postgres') {
+            const result = await getPostgresPool(srv.id).query(
+                'SELECT datname AS name FROM pg_database WHERE datistemplate = false ORDER BY datname;'
+            );
+            return res.json(result.rows);
+        }
+
+        if (srv.engine === 'mysql') {
+            const [rows] = await getMysqlPool(srv.id).query(
+                'SELECT SCHEMA_NAME AS name FROM INFORMATION_SCHEMA.SCHEMATA ORDER BY SCHEMA_NAME;'
+            );
+            return res.json(rows);
+        }
+
+        if (srv.engine === 'db2') {
+            const rows = await queryDb2(srv.id, 'SELECT CURRENT SERVER AS name FROM SYSIBM.SYSDUMMY1');
+            return res.json(rows);
+        }
+
         const pool = await getPool(srv.id);
         const result = await pool.request().query("SELECT name FROM sys.databases WHERE state_desc = 'ONLINE' ORDER BY name;");
         res.json(result.recordset);
@@ -296,10 +514,29 @@ app.get('/api/servers/:serverId/test', async (req, res) => {
     const servers = getServersList();
     const srv = servers.find(s => s.id === req.params.serverId || s.name === req.params.serverId) || servers[0];
 
+    if (IS_DEMO_MODE) {
+        return res.json({ success: true, demo: true, engine: srv.engine || 'sqlserver' });
+    }
+
     try {
         if (srv.engine === 'snowflake') {
             await executeSnowflakeQuery(req.params.serverId, 'SELECT CURRENT_VERSION();');
             return res.json({ success: true, engine: 'snowflake' });
+        }
+
+        if (srv.engine === 'postgres') {
+            await getPostgresPool(srv.id).query('SELECT 1 AS status');
+            return res.json({ success: true, engine: 'postgres' });
+        }
+
+        if (srv.engine === 'mysql') {
+            await getMysqlPool(srv.id).query('SELECT 1 AS status');
+            return res.json({ success: true, engine: 'mysql' });
+        }
+
+        if (srv.engine === 'db2') {
+            await queryDb2(srv.id, 'SELECT 1 AS status FROM SYSIBM.SYSDUMMY1');
+            return res.json({ success: true, engine: 'db2' });
         }
 
         const pool = await getPool(req.params.serverId);
@@ -341,6 +578,44 @@ app.get('/api/catalog', (req, res) => {
                     script: "Disk Utilization",
                     description: "Monitors free storage capacity across all mounted database drive volumes."
                 }
+            ]
+        },
+        {
+            id: "postgres-health",
+            label: "PostgreSQL Health & Performance",
+            description: "PostgreSQL uptime, connections, cache efficiency, query activity, and vacuum health.",
+            engines: ["postgres"],
+            queries: [
+                { id: "postgres-uptime", label: "PostgreSQL Uptime & Version", script: "Server Health", description: "Reports PostgreSQL version and postmaster start time." },
+                { id: "postgres-connections", label: "Active Connections & Limits", script: "Connection Health", description: "Shows active sessions, maximum connections, and utilization." },
+                { id: "postgres-database-sizes", label: "Database Size Overview", script: "Storage Telemetry", description: "Ranks databases by total allocated size." },
+                { id: "postgres-cache-hit-ratio", label: "Buffer Cache Hit Ratio", script: "Performance Telemetry", description: "Measures shared buffer cache effectiveness by database." },
+                { id: "postgres-long-running-queries", label: "Long-Running Queries", script: "Workload Telemetry", description: "Lists active queries running longer than one minute." },
+                { id: "postgres-vacuum-health", label: "Vacuum & Dead Tuple Health", script: "Maintenance Health", description: "Finds tables with dead tuples that may need vacuum attention." }
+            ]
+        },
+        {
+            id: "mysql-health",
+            label: "MySQL Health & Performance",
+            description: "MySQL version, connections, database sizes, and active query activity.",
+            engines: ["mysql"],
+            queries: [
+                { id: "mysql-uptime", label: "MySQL Uptime & Version", script: "Server Health", description: "Reports MySQL version and server uptime." },
+                { id: "mysql-connections", label: "Active Connections", script: "Connection Health", description: "Shows the current number of connected threads." },
+                { id: "mysql-database-sizes", label: "Database Size Overview", script: "Storage Telemetry", description: "Ranks schemas by allocated data and index size." },
+                { id: "mysql-long-running-queries", label: "Active Queries", script: "Workload Telemetry", description: "Lists currently running MySQL statements." }
+            ]
+        },
+        {
+            id: "db2-health",
+            label: "IBM DB2 Health & Performance",
+            description: "DB2 instance status, table inventory, active sessions, and estimated table sizes.",
+            engines: ["db2"],
+            queries: [
+                { id: "db2-uptime", label: "DB2 Instance Status", script: "Server Health", description: "Reports the connected DB2 database and current server timestamp." },
+                { id: "db2-table-count", label: "User Table Inventory", script: "Schema Telemetry", description: "Counts user tables in the connected DB2 database." },
+                { id: "db2-active-sessions", label: "Active Sessions", script: "Connection Health", description: "Reports the number of active DB2 connections." },
+                { id: "db2-table-sizes", label: "Table Row Estimates", script: "Storage Telemetry", description: "Ranks user tables by catalog row estimates." }
             ]
         },
         {
@@ -716,7 +991,7 @@ app.get('/api/catalog', (req, res) => {
 // REMEDIATION & ADMINISTRATIVE ENDPOINTS
 // ==========================================
 
-app.post('/api/actions/execute-ddl', async (req, res) => {
+app.post('/api/actions/execute-ddl', requirePermission('diagnostics:execute'), async (req, res) => {
     const { server, database, sql: ddlSql } = req.body;
     if (!ddlSql || typeof ddlSql !== 'string') {
         return res.status(400).json({ error: "No valid DDL statement supplied." });
@@ -757,7 +1032,7 @@ app.post('/api/actions/execute-ddl', async (req, res) => {
     }
 });
 
-app.post('/api/actions/cancel-query', async (req, res) => {
+app.post('/api/actions/cancel-query', requirePermission('diagnostics:execute'), async (req, res) => {
     const { server, query_id } = req.body;
     if (!query_id) {
         return res.status(400).json({ error: "Query ID is required." });
@@ -779,7 +1054,7 @@ app.post('/api/actions/cancel-query', async (req, res) => {
     }
 });
 
-app.post('/api/actions/kill-session', async (req, res) => {
+app.post('/api/actions/kill-session', requirePermission('sessions:terminate'), async (req, res) => {
     const { server, spid } = req.body;
     const sessionInt = parseInt(spid, 10);
     if (isNaN(sessionInt) || sessionInt <= 50) {
@@ -797,7 +1072,7 @@ app.post('/api/actions/kill-session', async (req, res) => {
     }
 });
 
-app.post('/api/actions/disable-autoshrink', async (req, res) => {
+app.post('/api/actions/disable-autoshrink', requirePermission('diagnostics:execute'), async (req, res) => {
     const { server, database } = req.body;
     if (!database) return res.status(400).json({ error: "Database name required." });
 
@@ -812,7 +1087,7 @@ app.post('/api/actions/disable-autoshrink', async (req, res) => {
     }
 });
 
-app.post('/api/actions/download-plan', async (req, res) => {
+app.post('/api/actions/download-plan', requirePermission('diagnostics:read'), async (req, res) => {
     const { server, database, plan_id } = req.body;
     const planIdInt = parseInt(plan_id, 10);
     if (isNaN(planIdInt)) {
@@ -843,7 +1118,7 @@ app.post('/api/actions/download-plan', async (req, res) => {
     }
 });
 
-app.post('/api/actions/download-deadlock', async (req, res) => {
+app.post('/api/actions/download-deadlock', requirePermission('diagnostics:read'), async (req, res) => {
     const { server, event_time } = req.body;
     try {
         const pool = await getPool(server);
@@ -1043,6 +1318,20 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
     const serverId = req.query.server || 'Local';
     const targetDb = req.query.database || 'master';
     const startTime = Date.now();
+
+    if (IS_DEMO_MODE) {
+        return res.json({
+            success: true,
+            demo: true,
+            elapsedMs: 25,
+            recordsets: [[{
+                status: 'SIMULATION',
+                engine: serverId,
+                database: targetDb,
+                message: 'Demo mode is active. No database connection was attempted.'
+            }]]
+        });
+    }
 
     try {
         const servers = getServersList();
@@ -1322,6 +1611,203 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
                 success: true,
                 elapsedMs: Date.now() - startTime,
                 recordsets: [logs.length ? logs : [{ status: 'No remediation actions logged to audit_log.json yet.' }]]
+            });
+        }
+
+        if (srv.engine === 'postgres' && categoryId === 'health-check') {
+            const postgresPool = getPostgresPool(srv.id);
+            let result;
+
+            if (queryId === 'server-uptime') {
+                result = await postgresPool.query(`
+                    SELECT pg_postmaster_start_time() AS postgres_start_time, version() AS version;
+                `);
+            } else if (queryId === 'backup-history') {
+                result = {
+                    rows: [{
+                        backup_status: 'NOT_REPORTED',
+                        message: 'PostgreSQL backup history is not available from the database server.'
+                    }]
+                };
+            } else if (queryId === 'agent-job-failures') {
+                result = {
+                    rows: [{
+                        status: 'NOT_APPLICABLE',
+                        message: 'SQL Server Agent jobs are not available for PostgreSQL.'
+                    }]
+                };
+            } else if (queryId === 'drive-space') {
+                result = await postgresPool.query(`
+                    SELECT current_database() AS database_name,
+                           pg_size_pretty(pg_database_size(current_database())) AS database_size,
+                           pg_database_size(current_database()) AS database_size_bytes;
+                `);
+            } else {
+                return res.status(400).json({ error: `Unsupported PostgreSQL health query: ${queryId}` });
+            }
+
+            return res.json({
+                success: true,
+                elapsedMs: Date.now() - startTime,
+                recordsets: [result.rows]
+            });
+        }
+
+        if (srv.engine === 'mysql' && (categoryId === 'health-check' || categoryId === 'mysql-health')) {
+            const mysqlPool = getMysqlPool(srv.id);
+            let result;
+
+            if (queryId === 'server-uptime' || queryId === 'mysql-uptime') {
+                const [versionRows] = await mysqlPool.query('SELECT VERSION() AS version;');
+                const [uptimeRows] = await mysqlPool.query("SHOW GLOBAL STATUS LIKE 'Uptime';");
+                result = [{
+                    version: versionRows[0]?.version,
+                    uptime_seconds: uptimeRows[0]?.Value || uptimeRows[0]?.value
+                }];
+            } else if (queryId === 'backup-history' || queryId === 'mysql-database-sizes') {
+                const [rows] = await mysqlPool.query(`
+                    SELECT table_schema AS database_name,
+                           ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) AS size_mb
+                    FROM information_schema.tables
+                    GROUP BY table_schema
+                    ORDER BY size_mb DESC;
+                `);
+                result = rows;
+            } else if (queryId === 'agent-job-failures' || queryId === 'mysql-connections') {
+                const [rows] = await mysqlPool.query(`
+                    SELECT VARIABLE_VALUE AS connected_threads
+                    FROM performance_schema.global_status
+                    WHERE VARIABLE_NAME = 'Threads_connected';
+                `);
+                result = rows;
+            } else if (queryId === 'drive-space' || queryId === 'mysql-long-running-queries') {
+                const [rows] = await mysqlPool.query(`
+                    SELECT id, user, db AS database_name, command, time AS duration_seconds,
+                           state, LEFT(info, 240) AS query
+                    FROM information_schema.processlist
+                    WHERE command <> 'Sleep'
+                    ORDER BY time DESC;
+                `);
+                result = rows;
+            } else {
+                return res.status(404).json({ error: `Unknown MySQL query ID: ${queryId}` });
+            }
+
+            return res.json({
+                success: true,
+                elapsedMs: Date.now() - startTime,
+                recordsets: [result]
+            });
+        }
+
+        if (srv.engine === 'db2' && (categoryId === 'health-check' || categoryId === 'db2-health')) {
+            let result;
+
+            if (queryId === 'server-uptime' || queryId === 'db2-uptime') {
+                result = await queryDb2(srv.id, `
+                    SELECT CURRENT SERVER AS database_name, CURRENT TIMESTAMP AS checked_at
+                    FROM SYSIBM.SYSDUMMY1;
+                `);
+            } else if (queryId === 'backup-history' || queryId === 'db2-table-count') {
+                result = await queryDb2(srv.id, `
+                    SELECT COUNT(*) AS table_count
+                    FROM SYSCAT.TABLES
+                    WHERE TABSCHEMA NOT LIKE 'SYS%';
+                `);
+            } else if (queryId === 'agent-job-failures' || queryId === 'db2-active-sessions') {
+                result = await queryDb2(srv.id, `
+                    SELECT COUNT(*) AS active_sessions
+                    FROM TABLE(MON_GET_CONNECTION(NULL, -2)) AS connections;
+                `);
+            } else if (queryId === 'drive-space' || queryId === 'db2-table-sizes') {
+                result = await queryDb2(srv.id, `
+                    SELECT TABSCHEMA AS schema_name, TABNAME AS table_name, CARD AS estimated_rows
+                    FROM SYSCAT.TABLES
+                    WHERE TABSCHEMA NOT LIKE 'SYS%'
+                    ORDER BY CARD DESC
+                    FETCH FIRST 50 ROWS ONLY;
+                `);
+            } else {
+                return res.status(404).json({ error: `Unknown DB2 query ID: ${queryId}` });
+            }
+
+            return res.json({
+                success: true,
+                elapsedMs: Date.now() - startTime,
+                recordsets: [result]
+            });
+        }
+
+        // ------------------------------------------------ PostgreSQL Health & Performance
+        if (srv.engine === 'postgres' && categoryId === 'postgres-health') {
+            const postgresPool = getPostgresPool(srv.id);
+            let result;
+
+            if (queryId === 'postgres-uptime') {
+                result = await postgresPool.query(`
+                    SELECT version(), pg_postmaster_start_time() AS postgres_start_time,
+                           now() - pg_postmaster_start_time() AS uptime;
+                `);
+            } else if (queryId === 'postgres-connections') {
+                result = await postgresPool.query(`
+                    SELECT current_setting('max_connections')::int AS max_connections,
+                           COUNT(*)::int AS total_connections,
+                           COUNT(*) FILTER (WHERE state = 'active')::int AS active_connections,
+                           ROUND(100.0 * COUNT(*) / NULLIF(current_setting('max_connections')::int, 0), 2) AS utilization_percent
+                    FROM pg_stat_activity;
+                `);
+            } else if (queryId === 'postgres-database-sizes') {
+                result = await postgresPool.query(`
+                    SELECT datname AS database_name,
+                           pg_size_pretty(pg_database_size(datname)) AS database_size,
+                           pg_database_size(datname) AS database_size_bytes
+                    FROM pg_database
+                    WHERE datistemplate = false
+                    ORDER BY database_size_bytes DESC;
+                `);
+            } else if (queryId === 'postgres-cache-hit-ratio') {
+                result = await postgresPool.query(`
+                    SELECT datname AS database_name,
+                           COALESCE(ROUND(100.0 * blks_hit / NULLIF(blks_hit + blks_read, 0), 2), 100.0) AS cache_hit_ratio_percent,
+                           blks_read,
+                           blks_hit
+                    FROM pg_stat_database
+                    WHERE datname IS NOT NULL
+                    ORDER BY cache_hit_ratio_percent ASC;
+                `);
+            } else if (queryId === 'postgres-long-running-queries') {
+                result = await postgresPool.query(`
+                    SELECT pid, datname AS database_name, usename AS user_name,
+                           now() - query_start AS duration, wait_event_type,
+                           wait_event, LEFT(query, 240) AS query
+                    FROM pg_stat_activity
+                    WHERE state = 'active'
+                      AND query_start IS NOT NULL
+                      AND now() - query_start > interval '1 minute'
+                      AND pid <> pg_backend_pid()
+                    ORDER BY query_start ASC;
+                `);
+            } else if (queryId === 'postgres-vacuum-health') {
+                result = await postgresPool.query(`
+                    SELECT schemaname AS schema_name, relname AS table_name,
+                           n_live_tup AS live_rows, n_dead_tup AS dead_rows,
+                           CASE WHEN n_live_tup = 0 THEN 0
+                                ELSE ROUND(100.0 * n_dead_tup / n_live_tup, 2)
+                           END AS dead_row_percent,
+                           last_autovacuum, last_autoanalyze
+                    FROM pg_stat_user_tables
+                    WHERE n_dead_tup > 0
+                    ORDER BY n_dead_tup DESC
+                    LIMIT 100;
+                `);
+            } else {
+                return res.status(404).json({ error: `Unknown PostgreSQL query ID: ${queryId}` });
+            }
+
+            return res.json({
+                success: true,
+                elapsedMs: Date.now() - startTime,
+                recordsets: [result.rows]
             });
         }
 
@@ -1778,7 +2264,7 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
     console.log(`\n==================================================`);
     console.log(`SQLDB Toolkit backend running on port ${PORT}`);
     console.log(`==================================================\n`);
@@ -1786,3 +2272,42 @@ app.listen(PORT, () => {
         exec(`start http://localhost:${PORT}`);
     }
 });
+
+async function closeResources() {
+    const closers = [];
+
+    for (const pool of connectionPools.values()) closers.push(pool.close().catch(() => {}));
+    for (const pool of postgresPools.values()) closers.push(pool.end().catch(() => {}));
+    for (const pool of mysqlPools.values()) closers.push(pool.end().catch(() => {}));
+
+    for (const pool of snowflakePools.values()) {
+        if (typeof pool.drain === 'function') {
+            closers.push(new Promise(resolve => pool.drain(() => resolve())));
+        }
+    }
+
+    for (const connectionPromise of db2Connections.values()) {
+        closers.push(connectionPromise.then(connection => new Promise(resolve => {
+            if (typeof connection.close === 'function') connection.close(() => resolve());
+            else resolve();
+        })).catch(() => {}));
+    }
+
+    await Promise.allSettled(closers);
+}
+
+async function shutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[Shutdown] Received ${signal}; draining connections.`);
+
+    const forceExit = setTimeout(() => process.exit(1), 10000);
+    forceExit.unref();
+    server.close(async () => {
+        await closeResources();
+        process.exit(0);
+    });
+}
+
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));

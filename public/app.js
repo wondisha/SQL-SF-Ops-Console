@@ -52,7 +52,11 @@ async function init() {
     setActiveCategory(catalog[0].id);
     testConnection();
   } catch (err) {
-    renderFatal(`Could not reach dashboard API at ${API_BASE}. (${err.message})`);
+    const isAuthConfigurationError = err.code === 'AUTHENTICATION_NOT_CONFIGURED';
+    const message = isAuthConfigurationError
+      ? 'Live authentication is not configured. Run start-demo.bat for team evaluation, or configure AUTH_JWKS_URL for live mode.'
+      : `Could not reach dashboard API at ${API_BASE}. (${err.message})`;
+    renderFatal(message);
   }
 }
 
@@ -127,6 +131,14 @@ async function onServerChanged() {
     state.databases = [];
     els.databaseSelect.innerHTML = '<option value="">(unavailable)</option>';
   }
+
+  renderSidebar();
+  const currentCategory = state.catalog.find((cat) => cat.id === state.activeCategory);
+  const engine = (state.servers.find((server) => server.id === state.serverId)?.engine || 'sqlserver').toLowerCase();
+  if (currentCategory?.engines?.length && !currentCategory.engines.includes(engine)) {
+    const firstVisibleCategory = state.catalog.find((cat) => !cat.engines?.length || cat.engines.includes(engine));
+    if (firstVisibleCategory) setActiveCategory(firstVisibleCategory.id);
+  }
 }
 
 async function testConnection() {
@@ -150,10 +162,13 @@ function renderSidebar() {
   const currentSrv = state.servers.find((s) => s.id === state.serverId) || state.servers[0];
   const engine = (currentSrv && currentSrv.engine) ? currentSrv.engine.toLowerCase() : 'sqlserver';
 
-  const visibleCatalog = state.catalog.filter((cat) => {
-    if (!cat.engines || cat.engines.length === 0) return true;
-    return cat.engines.includes(engine);
-  });
+  const visibleCatalog = state.catalog
+    .filter((cat) => !cat.engines?.length || cat.engines.includes(engine))
+    .sort((left, right) => {
+      const leftIsEngineSpecific = left.engines?.length ? 0 : 1;
+      const rightIsEngineSpecific = right.engines?.length ? 0 : 1;
+      return leftIsEngineSpecific - rightIsEngineSpecific;
+    });
 
   els.sidebar.innerHTML = `
     <div class="nav-group-title">${escapeHtml(currentSrv ? currentSrv.name : 'Engine')} Categories</div>
@@ -167,6 +182,7 @@ function renderSidebar() {
       )
       .join('')}
   `;
+  els.sidebar.scrollTop = 0;
 
   els.sidebar.querySelectorAll('.nav-item').forEach((el) => {
     el.addEventListener('click', () => setActiveCategory(el.dataset.cat));
@@ -620,11 +636,17 @@ async function fetchJSON(path, options = {}) {
 
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
+    let errorCode;
     try {
       const err = await res.json();
-      if (err.error || err.message) msg = `${msg}: ${err.message || err.error}`;
+      if (err.error || err.message) {
+        msg = `${msg}: ${err.message || err.error}`;
+        errorCode = err.error;
+      }
     } catch (_) {}
-    throw new Error(msg);
+    const error = new Error(msg);
+    error.code = errorCode;
+    throw error;
   }
   return res.json();
 }
