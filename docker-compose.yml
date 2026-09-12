@@ -14,12 +14,20 @@ services:
       - NODE_ENV=production
       - REDIS_HOST=omnidb-redis
       - REDIS_PORT=6379
+      - MYSQL_HOST=omnidb-mysql
     env_file:
       - .env
     volumes:
       - ./logs:/app/logs
     depends_on:
       - omnidb-redis
+      - omnidb-mysql
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:4000/healthz/live',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   omnidb-redis:
     image: redis:7-alpine
@@ -30,5 +38,20 @@ services:
     volumes:
       - redis_data:/data
 
+  omnidb-mysql:
+    image: mysql:8.4
+    container_name: omnidb-mysql
+    restart: unless-stopped
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_DATABASE: appdb
+      MYSQL_USER: svc_omnidb_monitor
+      MYSQL_PASSWORD: StrongSecret123!
+      MYSQL_ROOT_PASSWORD: LocalRootSecret123!
+    volumes:
+      - mysql_data:/var/lib/mysql
+
 volumes:
   redis_data:
+  mysql_data:

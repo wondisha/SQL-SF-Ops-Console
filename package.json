@@ -8,7 +8,8 @@
     "clean:server": "node -e \"const fs = require('fs'); if (fs.existsSync('dist-server')) fs.rmSync('dist-server', { recursive: true, force: true });\"",
     "build:server": "npm run clean:server && tsc -p tsconfig.server.json",
     "start:prod": "node dist-server/index.js",
-    "demo": "cross-env DEMO_MODE=true PORT=4000 node dist-server/index.js"
+    "demo": "cross-env DEMO_MODE=true PORT=4000 node dist-server/index.js",
+    "test:security": "node --test test/security.smoke.js"
   },
   "dependencies": {
     "@azure/identity": "^4.13.2",

@@ -6,9 +6,11 @@ echo ==================================================
 echo Starting SQL ^& Snowflake Ops Console...
 echo ==================================================
 
-:: Free port 4000 if occupied by a zombie process
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr :4000 ^| findstr LISTENING') do (
-    taskkill /F /PID %%a >nul 2>&1
+set "PORT=4000"
+netstat -aon | findstr ":4000 .*LISTENING" >nul
+if not errorlevel 1 (
+    set "PORT=4001"
+    echo Port 4000 is already in use. Using port 4001 instead.
 )
 
 if not exist .env (
@@ -26,7 +28,8 @@ if not exist servers.csv (
 )
 
 echo.
-echo Launching backend server on port 4000...
+echo Launching backend server on port %PORT%...
+set "DEMO_MODE=false"
 node src/server.js
 
 echo.
