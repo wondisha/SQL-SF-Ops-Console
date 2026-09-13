@@ -1,4 +1,4 @@
-# OmniDB Console (formerly SQLDB-Toolkit)
+# OmniDB Console 
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/wondisha/SQL-SF-Ops-Console?quickstart=1)
 [![Node.js](https://img.shields.io/badge/Node.js-20.x-green.svg)](https://nodejs.org/)
