@@ -21,14 +21,16 @@ bash ./scripts/generate-presentation-video.sh /absolute/path/to/omnidb-console-p
 
 ## What the video covers
 
-The generated presentation is built for technical and non-technical audiences and includes:
+The generated presentation is designed for technical and non-technical audiences and highlights:
 
-- Clear title and project positioning
-- Problem statement (fragmented multi-engine operations)
+- Clear project positioning and title framing
+- The operational problem: fragmented multi-engine database management
 - Unified console value across SQL Server, Snowflake, PostgreSQL, MySQL, and IBM DB2
-- Key features and telemetry capabilities
-- Demo-safe simulation mode
-- Security and governance posture
+- Snowflake performance visibility and optimization insights
+- Snowflake AI governance capabilities
+- Snowflake RBAC, role hierarchy, and privilege visibility
+- Security, auditability, and policy enforcement posture
+- Demo-safe simulation mode for risk-free walkthroughs
 - FinOps visibility and enterprise readiness
 
 ## Requirements
