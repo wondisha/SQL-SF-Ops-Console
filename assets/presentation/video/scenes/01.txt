@@ -1,0 +1,4 @@
+Unified database operations across SQL Server, Snowflake,
+PostgreSQL, MySQL, and IBM DB2.
+
+A polished, demo-ready overview for technical and non-technical audiences.

@@ -1,0 +1,5 @@
+FinOps views surface usage trends, queueing pressure,
+resource monitor posture, and efficiency opportunities.
+
+Enterprise readiness includes identity, secrets, TLS,
+observability, and CI security gates.

@@ -1,0 +1,4 @@
+Interactive simulation mode enables safe walkthroughs
+without live credentials or production infrastructure.
+
+Ideal for presentations, onboarding, and procurement evaluation.

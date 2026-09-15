@@ -9,6 +9,7 @@
     "build:server": "npm run clean:server && tsc -p tsconfig.server.json",
     "start:prod": "node dist-server/index.js",
     "demo": "cross-env DEMO_MODE=true PORT=4000 node dist-server/index.js",
+    "video:presentation": "bash ./scripts/generate-presentation-video.sh",
     "test:security": "node --test test/security.smoke.js"
   },
   "dependencies": {

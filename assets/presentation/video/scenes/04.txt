@@ -1,0 +1,4 @@
+• Engine-aware telemetry and diagnostics
+• Workload, wait, query, and storage insights
+• Unified navigation across heterogeneous estates
+• Stakeholder-friendly summaries for executive reviews
