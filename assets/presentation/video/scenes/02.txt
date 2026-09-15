@@ -1,0 +1,5 @@
+Modern teams manage multiple database engines
+through disconnected tools and fragmented dashboards.
+
+That creates monitoring blind spots, inconsistent governance,
+and slower incident response.

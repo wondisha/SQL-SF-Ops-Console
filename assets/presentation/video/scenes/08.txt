@@ -1,0 +1,4 @@
+One console for multi-engine database operations.
+
+Built for team evaluation, stakeholder demos,
+and enterprise-scale operational maturity.

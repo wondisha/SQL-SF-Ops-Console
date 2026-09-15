@@ -1,0 +1,4 @@
+Governance-first posture:
+• MFA and privileged access review
+• Policy and audit visibility
+• Production hardening guidance for secure rollout

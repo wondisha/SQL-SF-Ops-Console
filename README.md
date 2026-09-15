@@ -39,6 +39,28 @@ Open **`http://localhost:4000`** in your browser.
 
 ---
 
+## 🎬 MP4 Presentation Video (Shareable Asset)
+
+Need a polished presentation video for stakeholders? Generate the MP4 locally:
+
+```bash
+npm run video:presentation
+```
+
+Default output: **`assets/video/omnidb-console-presentation.mp4`**
+
+This presentation asset covers:
+- Title + problem statement
+- Unified operations across SQL Server, Snowflake, PostgreSQL, MySQL, and IBM DB2
+- Key features and telemetry
+- Demo-safe simulation mode
+- Security/governance posture
+- FinOps visibility and enterprise readiness
+
+See **[PRESENTATION-VIDEO.md](PRESENTATION-VIDEO.md)** for customization and sharing details.
+
+---
+
 ## 🚀 Quick Start (Production / Live Mode)
 
 1. Extract or clone this bundle on your host machine.
